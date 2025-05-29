@@ -10,62 +10,12 @@ import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.runApplication
 import org.springframework.stereotype.Service
 
-@Service
-class RmqSpringPublisher(
-	private val rabbitTemplate: RabbitTemplate,
-	private val batchingRabbitTemplate: BatchingRabbitTemplate
-) {
-
-	fun simplePublish() {
-		val messages = mutableListOf<Message>()
-		repeat(1_000_000) { index ->
-			val message = Message(
-				id = UUID.randomUUID().toString(),
-				content = "Test message $index"
-			)
-			messages.add(message)
-		}
-		measureTime {
-			messages.forEach { message ->
-				rabbitTemplate.convertAndSend(
-					RabbitMQConfig.EXCHANGE_NAME,
-					RabbitMQConfig.ROUTING_KEY,
-					message
-				)
-			}
-		}.let { millis ->
-			println("Published 1M messages in $millis")
-		}
-	}
-
-	fun batchPublish() {
-		val messages = mutableListOf<Message>()
-		repeat(1_000_000) { index ->
-			val message = Message(
-				id = UUID.randomUUID().toString(),
-				content = "Test message $index"
-			)
-			messages.add(message)
-		}
-		measureTime {
-			messages.forEach { message ->
-				batchingRabbitTemplate.convertAndSend(
-					RabbitMQConfig.EXCHANGE_NAME,
-					RabbitMQConfig.ROUTING_KEY,
-					message
-				)
-			}
-		}.let { millis ->
-			println("Batch published 1M messages in $millis")
-		}
-	}
-}
 
 @SpringBootApplication
 class Application
 
 fun main(args: Array<String>) {
 	val runApplication = runApplication<Application>(*args)
-	val application = runApplication.getBean(RmqSpringPublisher::class.java)
+	val application = runApplication.getBean(RmqPublisher::class.java)
 	application.batchPublish()
 }
