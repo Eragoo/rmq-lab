@@ -1,6 +1,6 @@
 # Batch Publish (1 Thread) vs Simple One-by-One Publish
 
-## Performance Comparison
+## Performance Comparison (without waiting for ack from brocker)
 
 | Method                 | Messages | Batch Size | Time     |
 |------------------------|----------|------------|----------|
@@ -29,3 +29,35 @@ b{"id":"bb074e71-7e93-4bef-a23b-9075dc353e10","content":"Test message 9","timest
 > **Can consumers process this batched message?**
 
 ### Answer:
+
+> **Yes, but the consumers should expect such message, since the format is different. So you cannot just change publisher to batch without changing consumer**
+
+
+
+
+# Publish with ack
+
+In RMQ we have an ability to wait for acknowledgement from brocker which confirms that message sent by producer is received. 
+
+To implement it we should do few things:
+- Use rmqTemplate.invoke insted of rmq.convertAndSend (which is just sending a message and forget about it)
+- In the scope of invoke we call convertAndSend or other similar function from AmqpTemplate interface and then waitForConfirms or similar from RabbitOperations interface. 
+Calling both in terms of same .invoke gives us an ability to publish message first and then wait for messages to be acked by brocker. 
+
+Implementation of simple ack (publisher-confirm-type: simple):
+rabbitTemplate.invoke {
+    it.convertAndSend(
+        RabbitMQConfig.EXCHANGE_NAME,
+        RabbitMQConfig.ROUTING_KEY,
+        message
+    )
+    it.waitForConfirmsOrDie(10_000)
+}
+
+On each message we waiting for ack from brocker. 
+According to documentation Channel.waitForConfirmsOrDie waits for all messages to be ack from prev waitForConfirms call. Yes, rmq caches messages you sent in unconfirmedSet =
+Collections.synchronizedSortedSet(new TreeSet<Long>()) (ChannelN implementation)
+
+Peformance comparison:
+1M messages simple ack per each message: 14m 34s
+1M messages simple ack per each 10k messages, same channel used to publish all messages: 17s, almost the same to what we have for publish without waiting for ack 

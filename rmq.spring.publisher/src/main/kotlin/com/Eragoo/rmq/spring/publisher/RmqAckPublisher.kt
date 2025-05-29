@@ -4,16 +4,14 @@ import com.Eragoo.rmq.spring.publisher.config.RabbitMQConfig
 import com.Eragoo.rmq.spring.publisher.model.Message
 import java.util.UUID
 import kotlin.time.measureTime
-import org.springframework.amqp.rabbit.core.BatchingRabbitTemplate
 import org.springframework.amqp.rabbit.core.RabbitTemplate
 import org.springframework.stereotype.Service
 
 @Service
 class RmqAckPublisher(
     private val rabbitTemplate: RabbitTemplate,
-    private val batchingRabbitTemplate: BatchingRabbitTemplate
 ) {
-    fun simplePublish(times: Int = 1_000_000) {
+    fun simpleAckPublish(times: Int = 1_000_000) {
         val messages = mutableListOf<Message>()
         repeat(times) { index ->
             val message = Message(
@@ -23,12 +21,17 @@ class RmqAckPublisher(
             messages.add(message)
         }
         measureTime {
-            messages.forEach { message ->
-                rabbitTemplate.convertAndSend(
-                    RabbitMQConfig.EXCHANGE_NAME,
-                    RabbitMQConfig.ROUTING_KEY,
-                    message
-                )
+            messages.chunked(10_000).forEach { chunk ->
+                rabbitTemplate.invoke {
+                    chunk.forEach { message ->
+                        it.convertAndSend(
+                            RabbitMQConfig.EXCHANGE_NAME,
+                            RabbitMQConfig.ROUTING_KEY,
+                            message
+                        )
+                    }
+                    it.waitForConfirmsOrDie(10_000)
+                }
             }
         }.let { millis ->
             println("Published 1M messages in $millis")

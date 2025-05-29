@@ -16,6 +16,6 @@ class Application
 
 fun main(args: Array<String>) {
 	val runApplication = runApplication<Application>(*args)
-	val application = runApplication.getBean(RmqPublisher::class.java)
-	application.batchPublish()
+	val application = runApplication.getBean(RmqAckPublisher::class.java)
+	application.simpleAckPublish()
 }
