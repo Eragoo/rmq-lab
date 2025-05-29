@@ -32,19 +32,21 @@ b{"id":"bb074e71-7e93-4bef-a23b-9075dc353e10","content":"Test message 9","timest
 
 > **Yes, but the consumers should expect such message, since the format is different. So you cannot just change publisher to batch without changing consumer**
 
+# Publishing with Publisher Confirms
 
+RabbitMQ supports publisher confirms, which allows producers to wait for acknowledgment that messages have been received by the broker. This ensures message delivery reliability.
 
+## Implementation
 
-# Publish with ack
+To use publisher confirms:
 
-In RMQ we have an ability to wait for acknowledgement from brocker which confirms that message sent by producer is received. 
+1. Configure RabbitMQ to use publisher confirms (e.g. publisher-confirm-type: simple)
+2. Use `rabbitTemplate.invoke` instead of direct `convertAndSend`
+3. Wait for confirmation using `waitForConfirmsOrDie`
+> Important note: you confirm only messages published inside .invoke function (same Channel used)
 
-To implement it we should do few things:
-- Use rmqTemplate.invoke insted of rmq.convertAndSend (which is just sending a message and forget about it)
-- In the scope of invoke we call convertAndSend or other similar function from AmqpTemplate interface and then waitForConfirms or similar from RabbitOperations interface. 
-Calling both in terms of same .invoke gives us an ability to publish message first and then wait for messages to be acked by brocker. 
-
-Implementation of simple ack (publisher-confirm-type: simple):
+Example from `RmqAckPublisher.kt`:
+```kotlin
 rabbitTemplate.invoke {
     it.convertAndSend(
         RabbitMQConfig.EXCHANGE_NAME,
@@ -53,11 +55,34 @@ rabbitTemplate.invoke {
     )
     it.waitForConfirmsOrDie(10_000)
 }
+```
 
-On each message we waiting for ack from brocker. 
-According to documentation Channel.waitForConfirmsOrDie waits for all messages to be ack from prev waitForConfirms call. Yes, rmq caches messages you sent in unconfirmedSet =
-Collections.synchronizedSortedSet(new TreeSet<Long>()) (ChannelN implementation)
+> **Note about confirmation behavior**: While this example waits for confirmation after each message, `waitForConfirms` actually confirms all messages published since the last call to `waitForConfirms` on the same channel. This means you can publish multiple messages and then call `waitForConfirms` once to confirm all of them, which is more efficient than confirming each message individually.
 
-Peformance comparison:
-1M messages simple ack per each message: 14m 34s
-1M messages simple ack per each 10k messages, same channel used to publish all messages: 17s, almost the same to what we have for publish without waiting for ack 
+Here's how to implement batch confirmation:
+```kotlin
+rabbitTemplate.invoke {
+    // Publish multiple messages
+    messages.forEach { message ->
+        it.convertAndSend(
+            RabbitMQConfig.EXCHANGE_NAME,
+            RabbitMQConfig.ROUTING_KEY,
+            message
+        )
+    }
+    // Wait for confirmation of all messages at once
+    it.waitForConfirmsOrDie(10_000)
+}
+```
+
+## Performance Comparison
+
+| Method | Messages | Confirmation Strategy | Time |
+|--------|----------|----------------------|------|
+| Simple Ack | 1M | Per message | 14m 34s |
+| Batched Ack | 1M | Per 10k messages | 17s |
+
+The batched approach is significantly faster because it:
+- Reduces the number of confirmation waits
+- Uses a single channel for all messages in a batch
+- Maintains the same reliability guarantees
