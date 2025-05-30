@@ -86,3 +86,177 @@ The batched approach is significantly faster because it:
 - Reduces the number of confirmation waits
 - Uses a single channel for all messages in a batch
 - Maintains the same reliability guarantees
+
+## Handling NACKs and Individual Message Tracking
+
+### The Problem with Batch Acknowledgments
+
+When using batch acknowledgments (like in `RmqAckPublisher.kt`), there's a significant limitation: **if a NACK is received, you cannot identify which specific message failed**.
+
+```kotlin
+// Batch approach - limited error handling
+rabbitTemplate.invoke {
+    messages.forEach { message ->
+        it.convertAndSend(exchange, routingKey, message)
+    }
+    // If this fails, which of the 10,000 messages was problematic?
+    it.waitForConfirmsOrDie(10_000)
+}
+```
+
+**Issues with batch acknowledgments:**
+- Cannot identify individual failed messages
+- Must republish entire batch on failure
+- No granular retry mechanism
+- Wastes resources on already successful messages
+
+### Solution: Asynchronous Acknowledgments with Individual Tracking
+
+The solution is to use **correlated publisher confirms** with asynchronous callbacks. This approach solves the batch limitation by tracking each message individually.
+
+#### What Problems Does Async ACK Solve?
+
+1. **Individual Message Tracking**: Know exactly which messages succeeded/failed
+2. **Non-blocking Operations**: Don't wait synchronously for confirmations
+3. **Granular Error Handling**: Retry only failed messages
+4. **Better Throughput**: Channel doesn't block during confirmation waits
+5. **Resource Efficiency**: Avoid republishing successful messages
+
+#### Implementation
+
+Here's how to implement async acknowledgments with individual tracking:
+
+```kotlin
+@Service
+class RmqAsyncAckPublisher(
+    private val connectionFactory: ConnectionFactory
+) {
+    private val pendingConfirmations = ConcurrentHashMap<String, Message>()
+    private val confirmedCount = AtomicInteger(0)
+    private val failedMessages = mutableListOf<Message>()
+    
+    fun publishWithAsyncAck(messages: List<Message>) {
+        val template = createAsyncTemplate()
+        
+        // Publish all messages without waiting
+        template.invoke { channel ->
+            messages.forEach { message ->
+                val correlationData = CorrelationData(message.id)
+                pendingConfirmations[message.id] = message
+                
+                channel.convertAndSend(
+                    RabbitMQConfig.EXCHANGE_NAME,
+                    RabbitMQConfig.ROUTING_KEY,
+                    message,
+                    correlationData
+                )
+            }
+            // No waitForConfirms - purely async!
+        }
+        
+        println("Published ${messages.size} messages asynchronously")
+        println("Confirmations will arrive via callbacks")
+    }
+    
+    private fun createAsyncTemplate(): RabbitTemplate {
+        val template = RabbitTemplate(connectionFactory)
+        template.messageConverter = Jackson2JsonMessageConverter()
+        template.isPublisherConfirms = true
+        template.setMandatory(true)
+        
+        // Handle individual confirmations asynchronously
+        template.setConfirmCallback { correlationData, ack, cause ->
+            val messageId = correlationData?.id
+            val message = messageId?.let { pendingConfirmations.remove(it) }
+            
+            if (ack && message != null) {
+                val count = confirmedCount.incrementAndGet()
+                println("✅ Message ${message.id} confirmed ($count total)")
+            } else if (!ack && message != null) {
+                failedMessages.add(message)
+                println("❌ Message ${message.id} NACKed: $cause")
+                // Could implement retry logic here
+                retryMessage(message)
+            }
+        }
+        
+        // Handle routing failures
+        template.setReturnsCallback { returned ->
+            val messageId = returned.correlationData?.id
+            val message = messageId?.let { pendingConfirmations.remove(it) }
+            
+            if (message != null) {
+                failedMessages.add(message)
+                println("📤 Message ${message.id} returned: ${returned.replyText}")
+                // Could implement retry with different routing
+                retryMessage(message)
+            }
+        }
+        
+        return template
+    }
+    
+    private fun retryMessage(message: Message) {
+        // Implement retry logic for individual failed messages
+        println("🔄 Retrying message: ${message.id}")
+        // Could republish to different exchange, dead letter queue, etc.
+    }
+    
+    fun getStatus(): PublishStatus {
+        return PublishStatus(
+            confirmed = confirmedCount.get(),
+            pending = pendingConfirmations.size,
+            failed = failedMessages.size
+        )
+    }
+}
+
+data class PublishStatus(
+    val confirmed: Int,
+    val pending: Int,
+    val failed: Int
+)
+```
+
+#### Comparison: Batch vs Async ACK
+
+| Aspect | Batch ACK (`RmqAckPublisher`) | Async ACK |
+|--------|-------------------------------|-----------|
+| **Blocking** | ✅ Synchronous, blocks on `waitForConfirms` | ❌ Non-blocking, async callbacks |
+| **Individual Tracking** | ❌ Cannot identify specific failed messages | ✅ Track each message individually |
+| **Error Recovery** | ❌ Must retry entire batch | ✅ Retry only failed messages |
+| **Throughput** | ⚠️ Limited by confirmation waits | ✅ Higher throughput, no blocking |
+| **Resource Usage** | ❌ May republish successful messages | ✅ Only retry actual failures |
+| **Complexity** | ✅ Simple implementation | ⚠️ More complex callback handling |
+| **Immediate Feedback** | ✅ Know result before method returns | ❌ Results arrive asynchronously |
+
+#### Pros and Cons of Async ACK
+
+**Pros:**
+- **Non-blocking**: Higher throughput, better resource utilization
+- **Individual tracking**: Know exactly which messages failed
+- **Efficient retry**: Only republish failed messages
+- **Scalable**: Can handle high-volume publishing
+- **Granular control**: Different handling per message type
+
+**Cons:**
+- **Complexity**: More complex error handling logic
+- **Async nature**: Results don't arrive immediately
+- **Memory usage**: Must track pending confirmations
+- **Callback management**: Need to handle callback lifecycle
+- **Debugging**: Harder to debug async flows
+
+#### When to Use Each Approach
+
+**Use Batch ACK when:**
+- Simple use cases with good broker reliability
+- Immediate feedback required
+- Occasional failures are acceptable
+- Simpler codebase preferred
+
+**Use Async ACK when:**
+- High-throughput requirements
+- Individual message tracking needed
+- Sophisticated error recovery required
+- Production systems with reliability demands
+- Need to minimize resource waste on retries

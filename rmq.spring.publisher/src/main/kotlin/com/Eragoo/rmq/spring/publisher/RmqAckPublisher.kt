@@ -2,7 +2,6 @@ package com.Eragoo.rmq.spring.publisher
 
 import com.Eragoo.rmq.spring.publisher.config.RabbitMQConfig
 import com.Eragoo.rmq.spring.publisher.model.Message
-import java.util.UUID
 import kotlin.time.measureTime
 import org.springframework.amqp.rabbit.core.RabbitTemplate
 import org.springframework.stereotype.Service
@@ -11,15 +10,7 @@ import org.springframework.stereotype.Service
 class RmqAckPublisher(
     private val rabbitTemplate: RabbitTemplate,
 ) {
-    fun simpleAckPublish(times: Int = 1_000_000) {
-        val messages = mutableListOf<Message>()
-        repeat(times) { index ->
-            val message = Message(
-                id = UUID.randomUUID().toString(),
-                content = "Test message $index"
-            )
-            messages.add(message)
-        }
+    fun simpleAckPublish(messages: List<Message>) {
         measureTime {
             messages.chunked(10_000).forEach { chunk ->
                 rabbitTemplate.invoke {
