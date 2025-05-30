@@ -1,3 +1,14 @@
+# RabbitMQ Publishing Performance Lab
+
+## Table of Contents
+
+- [Batch vs Simple One-by-One Publishing](#batch-publish-1-thread-vs-simple-one-by-one-publish)
+- [Publishing with Publisher Confirms](#publishing-with-publisher-confirms)
+- [Handling NACKs and Individual Message Tracking](#handling-nacks-and-individual-message-tracking)
+  - [Batch vs Async ACK Comparison](#comparison-batch-vs-async-ack)
+- [Complete Performance Comparison](#complete-performance-comparison)
+---
+
 # Batch Publish (1 Thread) vs Simple One-by-One Publish
 
 ## Performance Comparison (without waiting for ack from brocker)
