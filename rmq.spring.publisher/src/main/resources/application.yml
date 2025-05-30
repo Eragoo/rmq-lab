@@ -5,3 +5,4 @@ spring:
     username: guest
     password: guest
     publisher-confirm-type: simple
+    publisher-returns: true

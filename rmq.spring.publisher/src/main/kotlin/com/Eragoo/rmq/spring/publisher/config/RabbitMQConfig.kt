@@ -6,6 +6,7 @@ import org.springframework.amqp.core.Binding
 import org.springframework.amqp.core.BindingBuilder
 import org.springframework.amqp.core.DirectExchange
 import org.springframework.amqp.core.Queue
+import org.springframework.amqp.core.QueueBuilder
 import org.springframework.amqp.rabbit.batch.BatchingStrategy
 import org.springframework.amqp.rabbit.batch.SimpleBatchingStrategy
 import org.springframework.amqp.rabbit.connection.ConnectionFactory
@@ -49,7 +50,10 @@ class RabbitMQConfig {
 
     @Bean
     fun queue(): Queue {
-        return Queue(QUEUE_NAME, true)
+        return QueueBuilder.durable(QUEUE_NAME)
+            .maxLength(999_990L)
+            .overflow(QueueBuilder.Overflow.rejectPublish)
+            .build()
     }
 
     @Bean
