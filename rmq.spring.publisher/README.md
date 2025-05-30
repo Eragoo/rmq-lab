@@ -124,99 +124,16 @@ The solution is to use **correlated publisher confirms** with asynchronous callb
 
 #### Implementation
 
-Here's how to implement async acknowledgments with individual tracking:
+Key implementation points for async acknowledgments with individual tracking:
 
-```kotlin
-@Service
-class RmqAsyncAckPublisher(
-    private val connectionFactory: ConnectionFactory
-) {
-    private val pendingConfirmations = ConcurrentHashMap<String, Message>()
-    private val confirmedCount = AtomicInteger(0)
-    private val failedMessages = mutableListOf<Message>()
-    
-    fun publishWithAsyncAck(messages: List<Message>) {
-        val template = createAsyncTemplate()
-        
-        // Publish all messages without waiting
-        template.invoke { channel ->
-            messages.forEach { message ->
-                val correlationData = CorrelationData(message.id)
-                pendingConfirmations[message.id] = message
-                
-                channel.convertAndSend(
-                    RabbitMQConfig.EXCHANGE_NAME,
-                    RabbitMQConfig.ROUTING_KEY,
-                    message,
-                    correlationData
-                )
-            }
-            // No waitForConfirms - purely async!
-        }
-        
-        println("Published ${messages.size} messages asynchronously")
-        println("Confirmations will arrive via callbacks")
-    }
-    
-    private fun createAsyncTemplate(): RabbitTemplate {
-        val template = RabbitTemplate(connectionFactory)
-        template.messageConverter = Jackson2JsonMessageConverter()
-        template.isPublisherConfirms = true
-        template.setMandatory(true)
-        
-        // Handle individual confirmations asynchronously
-        template.setConfirmCallback { correlationData, ack, cause ->
-            val messageId = correlationData?.id
-            val message = messageId?.let { pendingConfirmations.remove(it) }
-            
-            if (ack && message != null) {
-                val count = confirmedCount.incrementAndGet()
-                println("✅ Message ${message.id} confirmed ($count total)")
-            } else if (!ack && message != null) {
-                failedMessages.add(message)
-                println("❌ Message ${message.id} NACKed: $cause")
-                // Could implement retry logic here
-                retryMessage(message)
-            }
-        }
-        
-        // Handle routing failures
-        template.setReturnsCallback { returned ->
-            val messageId = returned.correlationData?.id
-            val message = messageId?.let { pendingConfirmations.remove(it) }
-            
-            if (message != null) {
-                failedMessages.add(message)
-                println("📤 Message ${message.id} returned: ${returned.replyText}")
-                // Could implement retry with different routing
-                retryMessage(message)
-            }
-        }
-        
-        return template
-    }
-    
-    private fun retryMessage(message: Message) {
-        // Implement retry logic for individual failed messages
-        println("🔄 Retrying message: ${message.id}")
-        // Could republish to different exchange, dead letter queue, etc.
-    }
-    
-    fun getStatus(): PublishStatus {
-        return PublishStatus(
-            confirmed = confirmedCount.get(),
-            pending = pendingConfirmations.size,
-            failed = failedMessages.size
-        )
-    }
-}
+- **Cache messages by ID**: Store messages in a `ConcurrentHashMap<String, Message>` using message ID as key
+- **Send correlation data**: Use `CorrelationData(message.id)` when publishing so broker can return it back
+- **Enable publisher confirms**: Set `template.isPublisherConfirms = true` on RabbitTemplate  
+- **Add confirm callback**: Use `setConfirmCallback` to handle ACK/NACK responses asynchronously
+- **No blocking waits**: Don't use `waitForConfirms` - let callbacks handle everything asynchronously
+- **Thread safety**: Use atomic counters and concurrent collections for multi-threaded access
 
-data class PublishStatus(
-    val confirmed: Int,
-    val pending: Int,
-    val failed: Int
-)
-```
+Implmenetation example: `RmqCorrelatedAckPublisher.kt`
 
 #### Comparison: Batch vs Async ACK
 
@@ -260,3 +177,22 @@ data class PublishStatus(
 - Sophisticated error recovery required
 - Production systems with reliability demands
 - Need to minimize resource waste on retries
+
+## Complete Performance Comparison
+
+### All Publishing Methods Performance Results
+
+| Method | Messages | Strategy         | Confirmation | Time | Notes                                              |
+|--------|----------|------------------|--------------|------|----------------------------------------------------|
+| **Simple One-by-One** | 1M | Individual send  | None | ~12.5s | No reliability                                     |
+| **Batch Publish** | 1M | Batch of 10      | None | ~2s | Fast but no confirmation, require Consumer support |
+| **Simple ACK** | 1M | Individual send  | Per message | 14m 34s | Extremely slow                                     |
+| **Batched ACK** | 1M | ACK Batch of 10k | Per batch | ~17s | Good performance, limited error handling           |
+| **Async ACK** | 1M | Individual send  | Async callbacks | **~16.5s** | Best balance: performance + individual tracking    |
+
+### Key Insights
+
+1. **Async ACK vs Batched ACK**: Identical performance
+2. **Individual Tracking**: Async ACK provides individual message tracking
+3. **Reliability**: Async ACK offers the best of both worlds - speed and granular error handling
+4. **Scalability**: Async ACK performs well under high load without blocking

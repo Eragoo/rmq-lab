@@ -51,7 +51,7 @@ class RabbitMQConfig {
     @Bean
     fun queue(): Queue {
         return QueueBuilder.durable(QUEUE_NAME)
-            .maxLength(999_990L)
+            .maxLength(999_999L)
             .overflow(QueueBuilder.Overflow.rejectPublish)
             .build()
     }

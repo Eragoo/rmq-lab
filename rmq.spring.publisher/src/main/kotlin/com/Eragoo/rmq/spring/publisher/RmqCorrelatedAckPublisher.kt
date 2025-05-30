@@ -3,6 +3,7 @@ package com.Eragoo.rmq.spring.publisher
 import com.Eragoo.rmq.spring.publisher.config.RabbitMQConfig
 import com.Eragoo.rmq.spring.publisher.model.Message
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.measureTime
 import org.springframework.amqp.rabbit.connection.ConnectionFactory
 import org.springframework.amqp.rabbit.connection.CorrelationData
 import org.springframework.amqp.rabbit.core.RabbitTemplate
@@ -18,22 +19,24 @@ class RmqCorrelatedAckPublisher(
     fun publishWithAsyncAck(messages: List<Message>) {
         val template = createAsyncTemplate()
 
-        template.invoke { channel ->
-            messages.forEach { message ->
-                val correlationData = CorrelationData(message.id)
-                pendingConfirmations[message.id] = message
+        measureTime {
+            template.invoke { channel ->
+                messages.forEach { message ->
+                    val correlationData = CorrelationData(message.id)
+                    pendingConfirmations[message.id] = message
 
-                channel.convertAndSend(
-                    RabbitMQConfig.EXCHANGE_NAME,
-                    RabbitMQConfig.ROUTING_KEY,
-                    message,
-                    correlationData
-                )
+                    channel.convertAndSend(
+                        RabbitMQConfig.EXCHANGE_NAME,
+                        RabbitMQConfig.ROUTING_KEY,
+                        message,
+                        correlationData
+                    )
+                }
             }
+        }.let { millis ->
+            println("Published 1M messages in $millis")
+            println("Confirmations will arrive via callbacks")
         }
-
-        println("Published ${messages.size} messages asynchronously")
-        println("Confirmations will arrive via callbacks")
     }
 
     private fun createAsyncTemplate(): RabbitTemplate {
