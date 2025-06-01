@@ -121,6 +121,43 @@ rabbitTemplate.invoke {
 - No granular retry mechanism
 - Wastes resources on already successful messages
 
+### Solution: Individual Acknowledgments
+
+This approach solves the retry issue by providing callbacks that can track individual message acknowledgments and negative acknowledgments (NACKs). Unlike the batch approach, this method allows you to identify exactly which messages failed and handle them individually.
+
+Here's the implementation from `simpleAckPublishWithCallback`:
+
+```kotlin
+fun simpleAckPublishWithCallback(messages: List<Message>) {
+    measureTime {
+        messages.chunked(10_000).forEach { chunk ->
+            rabbitTemplate.invoke ({ channel ->
+                chunk.forEach { message ->
+                    channel.convertAndSend(
+                        RabbitMQConfig.EXCHANGE_NAME,
+                        RabbitMQConfig.ROUTING_KEY,
+                        message
+                    )
+                }
+                channel.waitForConfirmsOrDie(10_000)
+            },
+                { deliveryTag, multiple ->
+                    println("ACK tag: $deliveryTag multiple: $multiple")
+                },
+                { deliveryTag, multiple ->
+                    println("NACK tag $deliveryTag multiple: $multiple")
+                }
+            )
+        }
+    }.let { millis ->
+        println("Published 1M messages in $millis")
+    }
+}
+```
+
+**Important note about `waitForConfirms`**: We must call `waitForConfirms` after publishing because without it, when we stop publishing, we will stop receiving ACK/NACKs. The `waitForConfirms` ensures that we wait for all confirmations to be received before proceeding. This guarantees that all acknowledgment and negative acknowledgment callbacks are properly triggered.
+This approach is already okay for most applications, but we are still waiting for all messages to be confirmed, which can be desirable in some cases. However, for best publishing performance, it would be better to be fully asynchronous.
+
 ### Solution: Asynchronous Acknowledgments with Individual Tracking
 
 The solution is to use **correlated publisher confirms** with asynchronous callbacks. This approach solves the batch limitation by tracking each message individually.

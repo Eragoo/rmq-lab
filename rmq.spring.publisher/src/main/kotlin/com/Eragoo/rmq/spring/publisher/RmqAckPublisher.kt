@@ -28,4 +28,30 @@ class RmqAckPublisher(
             println("Published 1M messages in $millis")
         }
     }
+
+    fun simpleAckPublishWithCallback(messages: List<Message>) {
+        measureTime {
+            messages.chunked(10_000).forEach { chunk ->
+                rabbitTemplate.invoke ({ channel ->
+                    chunk.forEach { message ->
+                        channel.convertAndSend(
+                            RabbitMQConfig.EXCHANGE_NAME,
+                            RabbitMQConfig.ROUTING_KEY,
+                            message
+                        )
+                    }
+                    channel.waitForConfirmsOrDie(10_000)
+                },
+                    { deliveryTag, multiple ->
+                        println("ACK tag: $deliveryTag multiple: $multiple")
+                    },
+                    { deliveryTag, multiple ->
+                        println("NACK tag $deliveryTag multiple: $multiple")
+                    }
+                )
+            }
+        }.let { millis ->
+            println("Published 1M messages in $millis")
+        }
+    }
 }
