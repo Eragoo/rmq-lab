@@ -11,7 +11,7 @@ class Application
 
 fun main(args: Array<String>) {
 	val runApplication = runApplication<Application>(*args)
-	val application = runApplication.getBean(RmqAckPublisher::class.java)
+	val application = runApplication.getBean(RmqCorrelatedAckPublisher::class.java)
 
 	val times = 1_000_002
 	val messages = mutableListOf<Message>()
@@ -23,5 +23,5 @@ fun main(args: Array<String>) {
 		messages.add(message)
 	}
 
-	application.simpleAckPublishWithCallback(messages)
+	application.publishWithAsyncAck(messages)
 }

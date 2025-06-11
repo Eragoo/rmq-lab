@@ -34,7 +34,29 @@ class RmqCorrelatedAckPublisher(
                 }
             }
         }.let { millis ->
-            println("Published 1M messages in $millis")
+            println("Published ${messages.size} messages in $millis")
+            println("Confirmations will arrive via callbacks")
+        }
+    }
+
+    //creates channel churn (only with publisher-confirm-type: correlated?)
+    fun publishWithAsyncAckNoInvoke(messages: List<Message>) {
+        val template = createAsyncTemplate()
+
+        measureTime {
+                messages.forEach { message ->
+                    val correlationData = CorrelationData(message.id)
+                    pendingConfirmations[message.id] = message
+
+                    template.convertAndSend(
+                        RabbitMQConfig.EXCHANGE_NAME,
+                        RabbitMQConfig.ROUTING_KEY,
+                        message,
+                        correlationData
+                    )
+                }
+        }.let { millis ->
+            println("Published ${messages.size} messages in $millis")
             println("Confirmations will arrive via callbacks")
         }
     }

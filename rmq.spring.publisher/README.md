@@ -47,6 +47,54 @@ b{"id":"bb074e71-7e93-4bef-a23b-9075dc353e10","content":"Test message 9","timest
 
 RabbitMQ supports publisher confirms, which allows producers to wait for acknowledgment that messages have been received by the broker. This ensures message delivery reliability.
 
+## Channel Management and Memory Considerations
+
+⚠️ **Important**: Publisher confirmations are **per-channel** due to delivery tags being channel-scoped in the AMQP protocol. Each message published gets a unique delivery tag that only has meaning within its specific channel context.
+
+**Without using `.invoke()`:**
+- Each `convertAndSend()` call may checkout a new channel from the cache
+- Channels with pending confirmations cannot be immediately returned to cache
+- High-throughput publishing can exhaust the channel cache
+- New channels get created when cache is full
+- This can lead to **channel churn** and potential **OOM exceptions**
+
+**With `.invoke()` function:**
+- All operations within the callback use the **same dedicated channel**
+- Single channel handles all messages and their confirmations
+- Eliminates channel create/close overhead
+- Prevents memory issues from excessive channel creation
+
+```kotlin
+// ❌ Problematic - creates channel churn
+messages.forEach { message ->
+    template.convertAndSend(exchange, routingKey, message) // Each call = potential new channel
+}
+
+// ✅ Correct - uses single channel for all operations
+template.invoke { channel ->
+    messages.forEach { message ->
+        channel.convertAndSend(exchange, routingKey, message) // All use same channel
+    }
+}
+```
+
+## RabbitMQ Threading Model
+
+💡 **Technical Detail**: The RabbitMQ Java client library uses **separate threads** for different operations:
+
+- **I/O Thread per Connection**: Each connection has a dedicated thread for reading from the network socket
+- **Consumer Thread Pool**: Consumer callbacks are dispatched via a separate `ExecutorService` thread pool  
+- **Full-Duplex Channels**: A single channel can handle **bidirectional traffic** - publishing outbound messages while receiving confirmations/consumers on different threads
+
+This threading architecture enables:
+- **Concurrent Operations**: Publishing and consuming can happen simultaneously on the same channel
+- **Non-blocking Confirmations**: Confirmation callbacks are handled asynchronously without blocking publishers
+- **Scalable Performance**: Multiple threads can work with the same channel safely for different operation types
+
+**References**: 
+- [RabbitMQ Java Client API Guide - Consumer Operation Thread Pool](https://www.rabbitmq.com/client-libraries/java-api-guide#consumer-operation-thread-pool)
+- [RabbitMQ Java Client API Guide - Concurrency Considerations](https://www.rabbitmq.com/client-libraries/java-api-guide#concurrency-considerations-thread-safety)
+
 ## Implementation
 
 To use publisher confirms:

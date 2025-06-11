@@ -4,5 +4,6 @@ spring:
     port: 5672
     username: guest
     password: guest
-    publisher-confirm-type: simple
+#    correlated leads to channel churn but with template.invoke it doesn't. Why?
+    publisher-confirm-type: correlated
     publisher-returns: true
