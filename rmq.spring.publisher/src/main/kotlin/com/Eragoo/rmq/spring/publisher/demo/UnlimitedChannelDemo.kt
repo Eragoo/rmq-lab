@@ -1,5 +1,6 @@
 package com.Eragoo.rmq.spring.publisher.demo
 
+import com.Eragoo.rmq.spring.publisher.RmqUtils.monitorConnectionsCache
 import com.Eragoo.rmq.spring.publisher.config.RabbitMQConfig
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory
 import org.springframework.amqp.rabbit.core.RabbitTemplate
@@ -37,33 +38,8 @@ class UnlimitedChannelDemo : CommandLineRunner {
         
         val startLatch = CountDownLatch(1)
         val executor = Executors.newFixedThreadPool(6)
-        
-        // 5th thread - Monitoring thread to print channel statistics
-        executor.submit {
-            var iteration = 0
-            while (iteration < 25) {
-                try {
-                    val props = connectionFactory.cacheProperties
-                    println("\n📊 === Channel Statistics (${++iteration}) ===")
-                    props.forEach { (key, value) ->
-                        if (key.equals("idleConnections") ||
-                            key.equals("channelCacheSize") ||
-                            key.equals("openConnections") ||
-                            key.equals("channelCacheSize") ||
-                            key.equals("idleChannelsTx") ||
-                            key.equals("idleChannelsNotTx") ||
-                            key.equals("idleChannelsTxHighWater") ||
-                            key.equals("idleChannelsNotTxHighWater")
-                        ) {
-                            println("   $key: $value")
-                        }
-                    }
-                    Thread.sleep(1000)
-                } catch (e: Exception) {
-                    println("❌ Error getting cache properties: ${e.message}")
-                }
-            }
-        }
+
+        executor.submit { monitorConnectionsCache(connectionFactory) }
         
         // Threads 1-3: Block channels using invoke for 12 seconds
         repeat(3) { threadNum ->
