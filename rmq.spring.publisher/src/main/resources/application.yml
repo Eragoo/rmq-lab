@@ -7,3 +7,33 @@ spring:
 #    correlated leads to channel churn but with template.invoke it doesn't. Why?
     publisher-confirm-type: simple
     publisher-returns: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: unlimited
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    cache:
+      channel:
+        size: 3
+        checkout-timeout: 0  # Default - unlimited channel creation
+
+---
+spring:
+  config:
+    activate:
+      on-profile: limited
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    cache:
+      channel:
+        size: 3
+        checkout-timeout: 5000  # 5 seconds timeout

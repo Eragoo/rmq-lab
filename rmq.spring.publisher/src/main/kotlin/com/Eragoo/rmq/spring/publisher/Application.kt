@@ -22,6 +22,6 @@ fun main(args: Array<String>) {
 		)
 		messages.add(message)
 	}
-
-	application.publishWithAsyncAckNoInvoke(messages)
+//
+//	application.publishWithAsyncAckNoInvoke(messages)
 }
