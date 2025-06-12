@@ -25,7 +25,7 @@ class RmqAckPublisher(
                 }
             }
         }.let { millis ->
-            println("Published 1M messages in $millis")
+            println("Published ${messages.size} messages in $millis")
         }
     }
 
@@ -51,7 +51,7 @@ class RmqAckPublisher(
                 )
             }
         }.let { millis ->
-            println("Published 1M messages in $millis")
+            println("Published ${messages.size} messages in $millis")
         }
     }
 }
