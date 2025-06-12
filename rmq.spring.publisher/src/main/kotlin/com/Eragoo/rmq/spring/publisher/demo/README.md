@@ -2,11 +2,6 @@
 
 These two demo classes showcase the different behaviors of Spring AMQP channel management when the channel cache is exhausted. The configuration is managed through `application.yml` profiles.
 
-## Prerequisites
-
-1. **RabbitMQ Server Running**: Make sure RabbitMQ is running on `localhost:5672`
-2. **Test Queue**: Create a queue named `test-queue` (or demos will fail when publishing)
-
 ## Configuration
 
 The demos use Spring Boot's auto-configuration with profile-specific settings in `application.yml`:
@@ -43,51 +38,96 @@ spring:
 
 ## Demo Classes
 
-### 1. UnlimitedChannelDemo (Default Behavior)
+### 1. UnlimitedChannelDemo
 
 **Profile**: `unlimited`
 
-**Configuration** (from `application.yml`):
-```yaml
-spring:
-  profiles: unlimited
-  rabbitmq:
-    cache:
-      channel:
-        size: 3
-        checkout-timeout: 0  # Default - unlimited channel creation
-```
+**Key Features**:
+- **Channel Cache Size**: 3 channels
+- **Checkout Timeout**: 0 (unlimited channel creation)
+- **Test Scenario**: 4 threads compete for channels
+- **Connection Monitoring**: Real-time monitoring of connection cache
+
+**Test Sequence**:
+1. **Threads 1-3**: Each acquires a channel and blocks it for **12 seconds**
+2. **4th Thread**: Starts after 3 seconds, should get a NEW channel immediately
+3. **All threads**: Publish test messages through their channels
 
 **Expected Behavior**:
-- First 3 threads acquire channels 1, 2, 3 and block them for 12 seconds
-- 4th thread **immediately gets a NEW channel (channel 4)** without waiting
-- All threads complete successfully
-- Shows **unlimited channel creation** when cache is exhausted
+- First 3 threads acquire cached channels and hold them for 12 seconds
+- 4th thread **immediately gets a NEW channel** (outside cache) without waiting
+- All threads complete successfully, demonstrating **unlimited channel creation**
 
-### 2. LimitedChannelDemo (With Timeout)
+**Expected Output Example**:
+```
+=== UNLIMITED CHANNEL CREATION DEMO ===
+🔧 Connection Factory Configuration:
+   - Channel cache size: 3
+   - Channel checkout timeout: 0 = unlimited
+   - Profile: unlimited
+
+🔒 Thread 1 starting - will block channel for 12 seconds
+✅ Thread 1 acquired channel: 123456789
+🔒 Thread 2 starting - will block channel for 12 seconds  
+✅ Thread 2 acquired channel: 987654321
+🔒 Thread 3 starting - will block channel for 12 seconds
+✅ Thread 3 acquired channel: 456789123
+
+🔥 4th Thread starting - should get channel IMMEDIATELY
+🚀 4th Thread SUCCESS: Got channel 789123456 after 15ms
+   (New channel created - no waiting!)
+```
+
+### 2. LimitedChannelDemo
 
 **Profile**: `limited`
 
-**Configuration** (from `application.yml`):
-```yaml
-spring:
-  profiles: limited
-  rabbitmq:
-    cache:
-      channel:
-        size: 3
-        checkout-timeout: 5000  # 5 seconds timeout
-```
+**Key Features**:
+- **Channel Cache Size**: 3 channels  
+- **Checkout Timeout**: 5 seconds (strict limit)
+- **Test Scenario**: 4+ threads compete for limited channels
+- **Connection Monitoring**: Real-time monitoring of connection cache
+
+**Test Sequence**:
+1. **Threads 1-3**: Each acquires a channel and blocks it for **15 seconds**
+2. **4th Thread**: Starts after 3 seconds, should **TIMEOUT after 5 seconds**
+3. **6th Thread**: Starts after 8 more seconds to test channel release
+4. **All threads**: Attempt to publish test messages through their channels
 
 **Expected Behavior**:
-- First 3 threads acquire channels 1, 2, 3 and block them for 15 seconds
+- First 3 threads acquire all cached channels and hold them for 15 seconds
 - 4th thread **waits 5 seconds then TIMES OUT** with `AmqpTimeoutException`
-- 6th thread (started later) might succeed when channels are released
-- Shows **limited channel behavior** with timeout
+- 6th thread (started after 8 seconds) might succeed when some channels are released
+- Demonstrates **channel checkout timeout** enforcement
+
+**Expected Output Example**:
+```
+=== LIMITED CHANNEL WITH TIMEOUT DEMO ===
+🔧 Connection Factory Configuration:
+   - Channel cache size: 3
+   - Channel checkout timeout: 5s
+   - Profile: limited
+   - This LIMITS total channels and makes threads WAIT
+
+🔒 Thread 1 starting - will block channel for 15 seconds
+✅ Thread 1 acquired channel: 123456789
+🔒 Thread 2 starting - will block channel for 15 seconds
+✅ Thread 2 acquired channel: 987654321  
+🔒 Thread 3 starting - will block channel for 15 seconds
+✅ Thread 3 acquired channel: 456789123
+
+⏰ 4th Thread starting - should TIMEOUT after 5 seconds
+   (All 3 channels are blocked, no new channels allowed)
+✅ 4th Thread EXPECTED TIMEOUT after ~5000ms
+   Exception: Channel checkout timeout after 5000ms
+   This proves channelCheckoutTimeout is working!
+
+🔄 6th Thread starting after 8 seconds - channels might be available now
+✅ 6th Thread SUCCESS: Got channel 789123456 after 25ms
+   (Some channels may have been released by now)
+```
 
 ## How to Run
-
-### Option 1: Using Spring Boot Profiles
 
 ```bash
 # Run unlimited demo
@@ -97,36 +137,20 @@ spring:
 ./gradlew bootRun --args='--spring.profiles.active=limited'
 ```
 
-### Option 2: Using IDE
-
-1. Set active profile in your IDE:
-   - For unlimited: `--spring.profiles.active=unlimited`
-   - For limited: `--spring.profiles.active=limited`
-
-2. Run the respective main class
-
-### Option 3: Using Different application.yml profiles
-
-The demo uses the main `application.yml` file with profile-specific configurations. The configuration is automatically loaded based on the active profile.
 
 ## Key Observations to Look For
 
-### Unlimited Demo:
-```
-✅ Thread 1 acquired channel: 1
-✅ Thread 2 acquired channel: 2  
-✅ Thread 3 acquired channel: 3
-🚀 4th Thread SUCCESS: Got channel 4 after 15ms  # ← NEW CHANNEL CREATED
-```
+### Unlimited Demo Success Indicators:
+- All 4 threads get channels successfully
+- 4th thread gets channel almost immediately (< 50ms)
+- Channel hash codes show 4 different channels
+- No timeout exceptions occur
 
-### Limited Demo:
-```
-✅ Thread 1 acquired channel: 1
-✅ Thread 2 acquired channel: 2
-✅ Thread 3 acquired channel: 3
-✅ 4th Thread EXPECTED TIMEOUT after ~5000ms     # ← TIMEOUT EXCEPTION
-   Exception: Channel checkout timeout after 5000ms
-```
+### Limited Demo Behavior Indicators:
+- First 3 threads get channels successfully
+- 4th thread times out after exactly ~5000ms
+- `AmqpTimeoutException` is thrown for 4th thread
+- 6th thread may succeed depending on timing of channel releases
 
 ## Understanding the Difference
 
@@ -140,6 +164,14 @@ From the [Spring AMQP Documentation](https://docs.spring.io/spring-amqp/docs/cur
 
 ## Performance Implications
 
-- **Unlimited**: Higher memory usage but no blocking
-- **Limited**: Controlled memory usage but potential blocking/timeouts
-- **Production**: Consider `channelCheckoutTimeout` for resource control 
+- **Unlimited (Default)**:
+  - ✅ No blocking - immediate channel access
+  - ❌ Higher memory usage - unlimited channel creation
+  - ❌ Potential resource exhaustion under high load
+  - **Best for**: Low to medium load scenarios
+
+- **Limited (With Timeout)**:
+  - ✅ Controlled memory usage - strict channel limits
+  - ✅ Predictable resource consumption
+  - ❌ Potential blocking - threads may wait or timeout
+  - **Best for**: High load scenarios requiring resource control
