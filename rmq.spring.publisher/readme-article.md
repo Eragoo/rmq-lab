@@ -1,6 +1,6 @@
 # Spring RabbitTemplate High-Performance Publishing
 
-When building high-throughput messaging systems with RabbitMQ, the choice of publishing strategy can dramatically impact both performance and reliability, especially when you rely on abstractions like Spring RabbitTemplate. I've performed some tests which led me to dig into documentation and source code to understand the behavior behind the scenes, and today I want to share my observations.
+When building high-throughput messaging systems with RabbitMQ, the choice of publishing strategy can dramatically impact both performance and reliability, especially when you rely on abstractions like Spring RabbitTemplate. This article is a follow-up to my previous article where async confirmations were not covered in detail.  
 
 ## Simplest Confirmations with Callbacks
 
@@ -39,8 +39,6 @@ For granular control, correlated publisher confirmations offer asynchronous, non
 
 ```kotlin
 fun publishWithAsyncAck(messages: List<Message>) {
-    val template = createAsyncTemplate()
-    
     measureTime {
         template.invoke { channel ->
             messages.forEach { message ->
@@ -61,7 +59,8 @@ fun publishWithAsyncAck(messages: List<Message>) {
     }
 }
 
-private fun createAsyncTemplate(): RabbitTemplate {
+@Bean
+fun createAsyncTemplate(): RabbitTemplate {
     val template = RabbitTemplate(connectionFactory)
     template.messageConverter = Jackson2JsonMessageConverter()
     template.setMandatory(true)
@@ -85,9 +84,9 @@ private fun createAsyncTemplate(): RabbitTemplate {
 - **Individual tracking**: Each message tracked by its unique correlation ID
 - **Granular retry**: Only failed messages need to be retried, not entire batches
 
-## Channel Churn: The Hidden Performance Killer
+## Channel Churn: Hidden Performance Killer
 
-One of the most critical discoveries is how **channel churn** can destroy publishing performance, and how the `invoke()` function prevents it.
+One of the most critical discoveries is how **channel churn** can destroy publishing performance.
 
 ### Performance Issue with confirm-type: correlated
 
@@ -115,10 +114,12 @@ template.invoke { channel ->
 ```
 
 The `invoke()` function ensures:
-- All operations use the **same dedicated channel**
+- All operations use the **same channel**
 - Single channel handles all messages and their confirmations
-- Eliminates channel create/close overhead
+- Eliminates channel create/close overhead by using same channel per batch
 - Prevents memory issues from excessive channel creation
+
+Note: using `.invoke` gives no benefit if you're not using batches but just publish one-by-one.
 
 ## Publisher Confirm Types: Simple vs Correlated
 
@@ -130,7 +131,7 @@ spring:
   rabbitmq:
     publisher-confirm-type: simple
 ```
-You can have confirm-type: simple and still use correlation data, but you might experience an issue due to a bug in Spring RabbitTemplate: with confirm-type: simple, channels are returned to cache immediately if you don't tell them to wait for confirmations (with waitForConfirm for example).
+You can have `confirm-type: simple` and still use correlation data, but you might experience an issue due to a bug in Spring RabbitTemplate: with `confirm-type: simple`, channels are returned to cache immediately if you don't tell them to wait for confirmations (with `waitForConfirm` for example). This might be good since there's less possibility to exhaust the channel cache, but it might lead to unexpected results, so it's not recommended. Please use `correlated` if you want to use `confirmCallback`. 
 
 ### Correlated Confirmations
 ```yaml
@@ -139,11 +140,13 @@ spring:
     publisher-confirm-type: correlated
 ```
 
-There is no such issue for confirm-type: correlated, but since channels are held until all confirmations arrive with the default configuration, you might experience performance issues due to channel churn.
+There is no such issue for `confirm-type: correlated`, but since channels are held until all confirmations arrive with the default configuration, you might experience performance issues due to channel churn. Again, the flow is as follows:
 
-## Bonus: Why Channel Limits Matter for Performance
+Each publish operation tries to get a channel from the cache. If all channels are already taken, a new channel will be created. Then this channel will be closed since we cannot return it to the cache due to limited cache size. This leads to multiple channel create/close operations which affects performance and might even lead to OOM exceptions. 
 
-A lesser-known performance consideration is limiting the number of channels in your connection pool. Here's why this matters:
+## Why Channel Limits Matter
+
+A known performance consideration is limiting the number of channels in your pool. Here's why this matters:
 
 From the [Spring AMQP Documentation](https://docs.spring.io/spring-amqp/docs/current/reference/html/#connection-and-resource-management):
 
@@ -179,10 +182,6 @@ spring:
 - ✅ Predictable resource consumption
 - ❌ Potential blocking - threads may wait or timeout
 
-### Practical Example
-
-The demo classes in this project (`UnlimitedChannelDemo` and `LimitedChannelDemo`) demonstrate these behaviors with 4 competing threads. The unlimited configuration allows immediate channel creation, while the limited configuration enforces timeouts when all channels are busy.
-
 **When to limit channels:**
 - High-load production systems requiring resource control
 - When you need predictable memory consumption
@@ -195,15 +194,17 @@ The demo classes in this project (`UnlimitedChannelDemo` and `LimitedChannelDemo
 
 ## Key Takeaways
 
-1. **Monitor your RabbitMQ stats**
+1. **Don't blindly publish and forget if you want messages to be delivered**
+2. **Monitor your RabbitMQ stats**
 2. **Async ACK offers the best balance**
 3. **Channel limits matter**
-4. **Measure everything**
 
 The RabbitMQ Java client's threading model, with separate I/O threads and consumer thread pools, enables these optimizations to work effectively. Understanding these patterns can transform your messaging system from a performance bottleneck into a high-throughput, reliable component of your architecture.
 
+## What's Next
+
+In the next article, based on these findings, I plan to cover the outbox publishing pattern, which was initially planned but couldn't fit into this post.
+
 ## References
 
-- [RabbitMQ Java Client API Guide - Consumer Operation Thread Pool](https://www.rabbitmq.com/client-libraries/java-api-guide#consumer-operation-thread-pool)
-- [RabbitMQ Java Client API Guide - Concurrency Considerations](https://www.rabbitmq.com/client-libraries/java-api-guide#concurrency-considerations-thread-safety)
-- [Spring AMQP Documentation - Connection and Resource Management](https://docs.spring.io/spring-amqp/docs/current/reference/html/#connection-and-resource-management) 
+- [RabbitMQ Java Client API Guide](https://www.rabbitmq.com/client-libraries/java-api-guide)
