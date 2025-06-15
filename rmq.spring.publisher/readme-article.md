@@ -1,8 +1,8 @@
-# High Performance RabbitMQ Publishing: Spring RabbitTemplate
+# Spring RabbitTemplate High-Performance Publishing
 
-When building high-throughput messaging systems with RabbitMQ, the choice of publishing strategy can dramatically impact both performance and reliability. Especially when you rely on abstractions like Spring RabbitTemplate. I've performed some test to which lead me to dig into documentstion and source code to understand the behaviour behind.
+When building high-throughput messaging systems with RabbitMQ, the choice of publishing strategy can dramatically impact both performance and reliability, especially when you rely on abstractions like Spring RabbitTemplate. I've performed some tests which led me to dig into documentation and source code to understand the behavior behind the scenes, and today I want to share my observations.
 
-## Simple Confirmations with Callbacks: Understanding Delivery Tags
+## Simplest Confirmations with Callbacks
 
 The foundation of reliable RabbitMQ publishing starts with publisher confirmations. Here's a practical example that demonstrates how to track individual message acknowledgments:
 
@@ -26,16 +26,16 @@ rabbitTemplate.invoke ({ channel ->
 )
 ```
 
-**Key Implementation Details:**
+**Key Details:**
 - **Delivery Tags**: Each message gets a unique delivery tag that's scoped to the channel
 - **Callbacks**: Separate handlers for ACK (success) and NACK (failure) responses
-- **waitForConfirms**: Essential for ensuring all callbacks are triggered before proceeding
+- **waitForConfirms**: Essential for ensuring all callbacks are triggered before proceeding and returning channel to the cache
 
-To be honest it almost the same to just waitForConfirms but here you get some observability on failures and theoretically can even retry if you keep mapping of message to channel + delivery tag 
+To be honest, it's almost the same as just using waitForConfirms, but here you get some observability on failures and can theoretically even retry if you keep a mapping of message to channel + delivery tag. 
 
 ## Correlated Async ACK: Non-Blocking Individual Message Tracking
 
-For even better performance and granular control, correlated publisher confirmations offer asynchronous, non-blocking message tracking:
+For granular control, correlated publisher confirmations offer asynchronous, non-blocking message tracking:
 
 ```kotlin
 fun publishWithAsyncAck(messages: List<Message>) {
@@ -87,7 +87,7 @@ private fun createAsyncTemplate(): RabbitTemplate {
 
 ## Channel Churn: The Hidden Performance Killer
 
-One of the most critical discoveries in this is how **channel churn** can destroy publishing performance, and how the `invoke()` function prevents it.
+One of the most critical discoveries is how **channel churn** can destroy publishing performance, and how the `invoke()` function prevents it.
 
 ### Performance Issue with confirm-type: correlated
 
@@ -130,7 +130,7 @@ spring:
   rabbitmq:
     publisher-confirm-type: simple
 ```
-You can have confirm-type: simple and still use correlation data, but you might expirience an issue to to bug in spring rabbit template: with confirm-type: simple channels returned to cache immediateley if you don't tell to wait for confirmations (with waitForCofirm for example)
+You can have confirm-type: simple and still use correlation data, but you might experience an issue due to a bug in Spring RabbitTemplate: with confirm-type: simple, channels are returned to cache immediately if you don't tell them to wait for confirmations (with waitForConfirm for example).
 
 ### Correlated Confirmations
 ```yaml
@@ -139,7 +139,7 @@ spring:
     publisher-confirm-type: correlated
 ```
 
-There is no such issue for confirm-type: correlated, but since channels are held untill all confirmations arrive with default configuration you might expirience performance issues due to channel churn.
+There is no such issue for confirm-type: correlated, but since channels are held until all confirmations arrive with the default configuration, you might experience performance issues due to channel churn.
 
 ## Bonus: Why Channel Limits Matter for Performance
 
@@ -195,10 +195,10 @@ The demo classes in this project (`UnlimitedChannelDemo` and `LimitedChannelDemo
 
 ## Key Takeaways
 
-1. **Monitor your RMQ stats**
-3. **Async ACK offers the best balance**
-4. **Channel limits matter**
-5. **Measure everything**
+1. **Monitor your RabbitMQ stats**
+2. **Async ACK offers the best balance**
+3. **Channel limits matter**
+4. **Measure everything**
 
 The RabbitMQ Java client's threading model, with separate I/O threads and consumer thread pools, enables these optimizations to work effectively. Understanding these patterns can transform your messaging system from a performance bottleneck into a high-throughput, reliable component of your architecture.
 
