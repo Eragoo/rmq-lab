@@ -2,26 +2,26 @@
 
 #outbox #rabbitmq #microservices #performance
 
-## The Journey: Why I Started Investigating Outbox Publishing
+## Why Outbox Publishing?
 
 The database side of the outbox pattern has been excellently covered by [@msdousti](https://dev.to/msdousti/postgresql-outbox-pattern-revamped-part-1-3lai). But what about the publishing side? 
 
-My investigation started when a seemingly robust outbox implementation in production began causing incidents under high load. The system worked flawlessly during development and low-traffic periods, but when traffic spiked, we experienced:
+My investigation started when a seemingly robust outbox implementation began causing incidents under high load. The system worked flawlessly during development and low-traffic periods, but when traffic spiked, we experienced:
 
 - **Memory exhaustion** from improper channel management
 - **Publishing delays** that created growing backlogs
 
 What you also might experience:
-- **Lost messages** during broker connection issues
+- **Lost messages** due to different reasons
 - **Complete system freezes** when RabbitMQ publishing became a bottleneck
 
-These production incidents taught me that **the publishing strategy is just as critical as the database design** in the outbox pattern. A poor publishing implementation can negate all the reliability benefits of the outbox approach.
+These incidents taught me that **the publishing is just as critical as the database design** in the outbox pattern. A poor publishing implementation can negate all the reliability benefits of the outbox approach.
 
-This post shares the lessons learned and presents two production-tested strategies for reliable, high-performance outbox message publishing.
+This post shares the lessons learned and presents a few strategies for reliable, high-performance outbox message publishing.
 
-## Understanding the Outbox Pattern: Table + Scheduled Publishing
+## Outbox: Table + Scheduled Publishing
 
-Before diving into publishing strategies, let's clarify what we mean by the outbox pattern and why we focus on the scheduled publishing approach.
+Before diving into publishing strategies, let's clarify what I mean by the outbox pattern and why we focus on the scheduled publishing approach.
 
 ### What is the Outbox Pattern?
 
@@ -70,7 +70,7 @@ His work demonstrates how to:
 
 **This article picks up where his leaves off**: once you have optimized outbox table queries, how do you publish those messages to RabbitMQ efficiently and reliably?
 
-## Potential Publishing Incidents: What Goes Wrong in Production
+## Potential Publishing Incidents: What Goes Wrong under LOAD
 
 ### 1. Channel Exhaustion (OutOfMemoryError)
 
@@ -82,12 +82,14 @@ His work demonstrates how to:
 **Root Cause:**
 ```kotlin
 // ❌ DANGEROUS: Each call may create new channel
-messages.forEach { message ->
+unpublishedMessages.forEach { message ->
     rabbitTemplate.convertAndSend(exchange, routingKey, message)
 }
 ```
 
-Each `convertAndSend()` can checkout a new channel from the cache. Under high load, channels with pending operations can't be returned to cache, forcing creation of new channels until memory is exhausted.
+Each `convertAndSend()` can checkout a new channel from the cache. Under high load, channels __with pending operations__ can't be returned to cache, forcing creation of new channels until memory is exhausted.
+
+__Note__: channel churn also might lead to poor performance.
 
 ### 2. Publishing Bottlenecks
 
@@ -101,7 +103,7 @@ Poor acknowledgment strategies that block publishing threads:
 
 ```kotlin
 // ❌ BLOCKS: Each message waits for individual confirmation
-messages.forEach { message ->
+unpublishedMessages.forEach { message ->
     rabbitTemplate.invoke { channel ->
         channel.convertAndSend(exchange, routingKey, message)
         channel.waitForConfirmsOrDie(10_000) // Blocks here!
@@ -126,16 +128,6 @@ rabbitTemplate.convertAndSend(exchange, routingKey, message)
 markAsPublished(message)
 ```
 
-### 4. Connection Pool Exhaustion
-
-**Symptoms:**
-- `AmqpTimeoutException` during high load
-- Publishing threads hanging indefinitely
-- System recovery only after restart
-
-**Root Cause:**
-Improper channel cache configuration and checkout timeouts.
-
 ## Understanding Publisher Confirms: Foundation for Reliability
 
 Before exploring specific strategies, it's crucial to understand RabbitMQ's publisher confirm mechanism, which I covered in detail in my previous articles:
@@ -152,10 +144,10 @@ Let's start with the simplest approach, though it's likely not suitable for most
 ### When Fire-and-Forget Makes Sense
 
 Fire-and-forget is appropriate when:
-- **Performance is critical** over reliability
-- **Occasional message loss is acceptable** (analytics, logs)
+- **Performance is critical over reliability**
+- **Occasional message loss is acceptable**
 - **Network environment is very stable**
-- **Non-critical business events** (user activity tracking)
+- **Non-critical business events**
 
 ### Implementation
 
@@ -165,7 +157,9 @@ class FireAndForgetPublisher(
     private val rabbitTemplate: RabbitTemplate
 ) {
     fun publishOutboxMessages(messages: List<OutboxMessage>) {
-        // ✅ CRITICAL: Use invoke() to prevent channel churn
+        // ✅ CRITICAL: Channel churn does not occur here because no confirmation type is set.
+        // Therefore, no related background processes (e.g., waiting for acknowledgment) are attached to the channel,
+        // allowing the channel to be returned to the cache immediately after publishing.
         rabbitTemplate.invoke { channel ->
             messages.forEach { outboxMessage ->
                 channel.convertAndSend(
@@ -185,47 +179,15 @@ class FireAndForgetPublisher(
 
 ### Performance Characteristics
 
-- **Throughput**: ~80,000 messages/second
+- **Throughput**: A LOT of messages/second
 - **Latency**: Minimal (no network round-trips for confirmations)
 - **Reliability**: None (messages can be lost silently)
-
-### The Channel Churn Problem
-
-Even with fire-and-forget, you must use `rabbitTemplate.invoke()` to prevent channel exhaustion:
-
-```kotlin
-// ❌ DANGEROUS: Potential channel churn
-messages.forEach { message ->
-    rabbitTemplate.convertAndSend(exchange, routingKey, message.payload)
-}
-
-// ✅ SAFE: Single channel for all operations
-rabbitTemplate.invoke { channel ->
-    messages.forEach { message ->
-        channel.convertAndSend(exchange, routingKey, message.payload)
-    }
-}
-```
-
-As explained in the [Spring AMQP documentation](https://docs.spring.io/spring-amqp/docs/current/reference/html/#connection-and-resource-management), each `convertAndSend()` call may checkout a new channel from the cache. Under high load, this can exhaust available channels and cause memory issues.
-
-### Configuration for Fire-and-Forget
-
-```yaml
-spring:
-  rabbitmq:
-    # No publisher-confirm-type needed for fire-and-forget
-    cache:
-      channel:
-        size: 10
-        checkout-timeout: 5000
-```
 
 ## Strategy 2: Async ACK with Correlation (Recommended)
 
 For most production outbox implementations, async acknowledgments with correlation provide the best balance of performance and reliability.
 
-### Why Async ACK is Ideal for Outbox
+### Why Async (HOW TO GUARANTEE OTHER THREADS NOT SELECT SAME MESSAGES TO PUBLISH SMTH TWICE) ACK is Ideal for Outbox
 
 The async approach solves key outbox publishing challenges:
 
