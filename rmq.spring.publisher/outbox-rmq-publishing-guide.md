@@ -11,8 +11,8 @@ My investigation started when a seemingly robust outbox implementation began cau
 - **Memory exhaustion** from improper channel management
 - **Publishing delays** that created growing backlogs
 
-What you also might experience:
-- **Lost messages** due to different reasons
+What you might also experience:
+- **Lost messages** due to various reasons
 - **Complete system freezes** when RabbitMQ publishing became a bottleneck
 
 These incidents taught me that **the publishing is just as critical as the database design** in the outbox pattern. A poor publishing implementation can negate all the reliability benefits of the outbox approach.
@@ -70,7 +70,7 @@ His work demonstrates how to:
 
 **This article picks up where his leaves off**: once you have optimized outbox table queries, how do you publish those messages to RabbitMQ efficiently and reliably?
 
-## Potential Publishing Incidents: What Goes Wrong under LOAD
+## Potential Publishing Incidents: What Goes Wrong Under Load
 
 ### 1. Channel Exhaustion (OutOfMemoryError)
 
@@ -87,9 +87,9 @@ unpublishedMessages.forEach { message ->
 }
 ```
 
-Each `convertAndSend()` can checkout a new channel from the cache. Under high load, channels __with pending operations__ can't be returned to cache, forcing creation of new channels until memory is exhausted.
+Each `convertAndSend()` can check out a new channel from the cache. Under high load, channels __with pending operations__ can't be returned to cache, forcing creation of new channels until memory is exhausted.
 
-__Note__: channel churn also might lead to poor performance.
+__Note__: Channel churn can also lead to poor performance.
 
 ### 2. Publishing Bottlenecks
 
@@ -132,8 +132,8 @@ markAsPublished(message)
 
 Before exploring specific strategies, it's crucial to understand RabbitMQ's publisher confirm mechanism, which I covered in detail in my previous articles:
 
-- [From Fire-and-Forget to Reliable: RabbitMQ Ack](https://dev.to/eragoo/from-fire-and-forget-to-reliable-rabbitmq-ack-3nnb) - covers simple and batch acknowledgments
-- [From Fire-and-Forget to Reliable: RabbitMQ Ack [pt. 2]](https://dev.to/eragoo/from-fire-and-forget-to-reliable-rabbitmq-ack-pt-2-5en6) - covers async confirmations with correlation
+- [From Fire-and-Forget to Reliable: RabbitMQ ACK](https://dev.to/eragoo/from-fire-and-forget-to-reliable-rabbitmq-ack-3nnb) - covers simple and batch acknowledgments
+- [From Fire-and-Forget to Reliable: RabbitMQ ACK [pt. 2]](https://dev.to/eragoo/from-fire-and-forget-to-reliable-rabbitmq-ack-pt-2-5en6) - covers async confirmations with correlation
 
 **Publisher confirms** ensure message delivery by having the broker acknowledge receipt of each message. This is essential for reliable outbox publishing, as it tells you definitively whether a message reached the broker.
 
@@ -191,7 +191,7 @@ For most outbox implementations, synchronous batch acknowledgments provide the o
 
 The synchronous batch approach solves critical outbox publishing challenges that async approaches cannot address:
 
-1. **Transaction atomicity** - publishing and database updates happen in same transaction
+1. **Transaction atomicity** - publishing and database updates happen in the same transaction
 2. **No limbo state** - messages are never stuck between published and marked-as-published
 3. **Simple error handling** - either all messages succeed or all retry together
 4. **Guaranteed consistency** - SELECT FOR UPDATE prevents duplicate processing across threads
@@ -258,7 +258,7 @@ spring:
 
 - **Throughput**: ~1,000-5,000 messages/second (depending on batch size)
 - **Latency**: Moderate (waits for batch confirmations)
-- **Reliability**: Highest (atomic transactions, no lost messages, duplicates possible on re-try)
+- **Reliability**: Highest (atomic transactions, no lost messages, duplicates possible on retry)
 - **Memory**: Low (no pending confirmation tracking needed)
 - **Complexity**: Low (simple transaction flow)
 
@@ -297,22 +297,22 @@ try {
     // No complex cleanup needed
 }
 ```
-**⚠️ Publish duplicates on NACK**
+**⚠️ Publish Duplicates on NACK**
 ```kotlin
 try {
     publishAndConfirm(messages)
     markAsPublished(messages)
 } catch (Exception e) {
-    // if publishAndConfirm failed due to received nack - we're
+    // If publishAndConfirm failed due to received NACK - we're
     // forced to retry the whole batch which creates duplicates
 }
 ```
 
-Theoretically, to address duplicate publications on NACK, you can use the callbacks provided by the invoke() method. You can define two callbacks: one for ACK and one for NACK. These callbacks only provide the deliveryTag, but since you're publishing from the same channel, you can try caching a deliveryTag to outboxMessageId mapping in order to individually track and handle NACKed messages and avoid this issue.
+Theoretically, to address duplicate publications on NACK, you can use the callbacks provided by the `invoke()` method. You can define two callbacks: one for ACK and one for NACK. These callbacks only provide the deliveryTag, but since you're publishing from the same channel, you can try caching a deliveryTag-to-outboxMessageId mapping in order to individually track and handle NACKed messages and avoid this issue.
 
 ## Strategy 3: Async ACK with Correlation (Complex but High Throughput)
 
-While async acknowledgments offer higher throughput, they introduce significant complexity and potential consistency issues for outbox implementations. This approach is not reccomended untill other options are not enough for your use-case.
+While async acknowledgments offer higher throughput, they introduce significant complexity and potential consistency issues for outbox implementations. This approach is not recommended until other options are not enough for your use case.
 
 ### Critical Issues with Async ACK for Outbox
 
@@ -354,14 +354,14 @@ The async approach conflicts with key outbox pattern guarantees:
 1. **Breaks atomicity** - publish and mark-as-published happen in different transactions
 2. **Creates limbo state** - messages can be published but never marked as such
 3. **Timeout complexity** - need cleanup jobs for lost ACKs
-5. **Complex recovery** - sophisticated state machine required
+4. **Complex recovery** - sophisticated state machine required
 
 ### When Async ACK Makes Sense
 
 Despite the issues, async ACK can work when:
-- **Batch sync ack is not enough**
-- **NACKs happen often, which leads to tons of duplicates with sync ack**
-- **Complex state management acceptable**
+- **Batch sync ACK is not enough**
+- **NACKs happen often, which leads to tons of duplicates with sync ACK**
+- **Complex state management is acceptable**
 
 ### Async Implementation (Use with Caution)
 
@@ -450,10 +450,10 @@ class AsyncAckOutboxPublisher(
 If you choose async ACK despite the complexity, you need:
 
 1. **State machine** with PENDING/IN_FLIGHT/PUBLISHED/FAILED states
-2. **Cleanup jobs**
+2. **Cleanup jobs** for handling timeouts and lost ACKs
 3. **Duplicate detection** at consumer level (always should be there IMO)
 4. **Sophisticated monitoring** for limbo states
-5. **Manual intervention procedures** for poison pill messages (needed for sync ack as well)
+5. **Manual intervention procedures** for poison pill messages (needed for sync ACK as well)
 
 ### Configuration for Async ACK
 
@@ -469,7 +469,7 @@ spring:
 
 ### Key Characteristics
 
-- **Throughput**: limited only by network and number of workers
+- **Throughput**: Limited only by network and number of workers
 - **Latency**: Low (non-blocking confirmations)  
 - **Reliability**: Moderate (complex error scenarios)
 - **Memory**: High overhead (tracking pending confirmations + cleanup jobs)
@@ -488,10 +488,10 @@ As documented in the [RabbitMQ Java Client Guide](https://www.rabbitmq.com/clien
 3. **Memory usage grows** as channels accumulate
 4. **OutOfMemoryError** occurs when too many channels exist
 
-### Solution: Publish batch with same channel
+### Solution: Publish Batch with Same Channel
 
 ```kotlin
-// ❌ PROBLEMATIC: Each call may checkout new channel
+// ❌ PROBLEMATIC: Each call may check out new channel
 outboxMessages.forEach { message ->
     rabbitTemplate.convertAndSend(exchange, routingKey, message.payload)
 }
@@ -509,7 +509,7 @@ rabbitTemplate.invoke { channel ->
 The `invoke()` method ensures:
 - **Single channel checkout** for the entire operation
 - **No channel creation overhead** during bulk operations
-- **Predictable memory usage** regardless of message count with limited number of publisher threads
+- **Predictable memory usage** regardless of message count with a limited number of publisher threads
 
 ### Additional Channel Management
 
@@ -524,27 +524,7 @@ spring:
         checkout-timeout: 5000 # 5 second timeout
 ```
 
-When `checkout-timeout` is set, the channel cache becomes a hard limit. If all channels are busy, threads will wait up to 5 seconds for an available channel, preventing unlimited channel creation. In other words, you can avoid OOM by the price of channel checkout timeout exception Rule of thumb here: making sure you're not waisting resources on creating/closing channels while cache size is enough to handle your load so your application is not waiting for channels to be ready. 
-
-### The Reliability vs Performance Trade-off
-
-**Sync Batch ACK vs Fire-and-Forget**: 
-- Lower throughput but **zero message loss risk**
-- Simple transaction model vs complex async state management
-- Perfect for most business-critical outbox implementations
-
-**Sync Batch ACK vs Async ACK**:
-- Much lower throughput but **eliminates transaction boundary issues**
-- Simple error handling vs complex callback management  
-- No limbo states or timeout complexity
-- Poison pill messages require handling in both cases
-
-For most production outbox implementations, the reliability and simplicity benefits of Sync Batch ACK outweigh the performance trade-offs because:
-
-- **Guaranteed consistency** - either all messages publish or none do
-- **Simple debugging** - single transaction flow, no async complexity
-- **No lost messages** - atomic operation prevents limbo states
-- **Lower operational overhead** - no cleanup jobs or state machines needed
+When `checkout-timeout` is set, the channel cache becomes a hard limit. If all channels are busy, threads will wait up to 5 seconds for an available channel, preventing unlimited channel creation. In other words, you can avoid OOM at the price of channel checkout timeout exceptions. A rule of thumb here: make sure you're not wasting resources on creating/closing channels while the cache size is sufficient to handle your load, so your application is not waiting for channels to be ready.
 
 ## Monitoring and Observability
 
