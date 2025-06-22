@@ -2,6 +2,20 @@
 
 #outbox #rabbitmq #microservices #performance
 
+## Table of Contents
+
+- [Why Outbox Publishing?](#why-outbox-publishing)
+- [Outbox: Table + Scheduled Publishing](#outbox-table--scheduled-publishing)
+- [Database Side: Already Solved](#database-side-already-solved)
+- [Potential Publishing Incidents: What Goes Wrong Under Load](#potential-publishing-incidents-what-goes-wrong-under-load)
+- [Understanding Publisher Confirms: Foundation for Reliability](#understanding-publisher-confirms-foundation-for-reliability)
+- [Strategy 1: Fire and Forget (Simple but Risky)](#strategy-1-fire-and-forget-simple-but-risky)
+- [Strategy 2: Synchronous Batch ACK](#strategy-2-synchronous-batch-ack)
+- [Strategy 3: Async ACK with Correlation (Complex but High Throughput)](#strategy-3-async-ack-with-correlation-complex-but-high-throughput)
+- [Channel Churn Pitfall: Critical for Both Strategies](#channel-churn-pitfall-critical-for-both-strategies)
+- [Monitoring and Observability](#monitoring-and-observability)
+- [Conclusion](#conclusion)
+
 ## Why Outbox Publishing?
 
 The database side of the outbox pattern has been excellently covered by [@msdousti](https://dev.to/msdousti/postgresql-outbox-pattern-revamped-part-1-3lai). But what about the publishing side? 
@@ -536,3 +550,28 @@ For production outbox implementations, implement these monitoring strategies:
 - **Confirmation rate** - ACK/NACK ratio
 - **Pending confirmations** - messages waiting for confirmation
 - **Channel utilization** - active channels vs cache size
+
+## Conclusion
+
+The outbox pattern is only as reliable as its publishing implementation. Through real-world incidents and performance testing, we've learned that the publishing side deserves as much attention as the database design.
+
+### Key Takeaways
+
+1. **Channel management is critical**: Try using `invoke()` to batch publish messages with a single channel.
+
+2. **Choose the right strategy for your needs**:
+   - **Fire-and-Forget**: Only for non-critical data where performance trumps reliability
+   - **Synchronous Batch ACK**: The recommended approach for most outbox implementations
+   - **Async ACK with Correlation**: Only when sync batch throughput is insufficient and you can handle the complexity
+
+3. **Sync Batch ACK is usually the best choice** because it:
+   - Maintains transaction atomicity
+   - Avoids limbo states
+   - Simplifies error handling
+   - Requires minimal infrastructure
+
+4. **Monitor everything**: Track outbox table size, publishing rates, and channel utilization to catch issues before they become incidents.
+
+Remember: the goal of the outbox pattern is reliability. Don't compromise that reliability for marginal performance gains. A slightly slower but rock-solid implementation will serve you better than a fast but fragile one.
+
+The synchronous batch ACK strategy provides the optimal balance for most use cases—embrace its simplicity and let it handle your critical business events with confidence. But remember about the duplicate issue. 
