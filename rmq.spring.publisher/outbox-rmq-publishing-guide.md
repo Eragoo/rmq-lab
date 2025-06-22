@@ -177,26 +177,193 @@ class FireAndForgetPublisher(
 }
 ```
 
-### Performance Characteristics
+### Key Characteristics
 
 - **Throughput**: A LOT of messages/second
 - **Latency**: Minimal (no network round-trips for confirmations)
 - **Reliability**: None (messages can be lost silently)
 
-## Strategy 2: Async ACK with Correlation (Recommended)
+## Strategy 2: Synchronous Batch ACK
 
-For most production outbox implementations, async acknowledgments with correlation provide the best balance of performance and reliability.
+For most outbox implementations, synchronous batch acknowledgments provide the optimal balance of reliability, simplicity, and performance while avoiding the transaction boundary issues inherent in async approaches.
 
-### Why Async (HOW TO GUARANTEE OTHER THREADS NOT SELECT SAME MESSAGES TO PUBLISH SMTH TWICE) ACK is Ideal for Outbox
+### Why Synchronous Batch ACK is Ideal for Outbox
 
-The async approach solves key outbox publishing challenges:
+The synchronous batch approach solves critical outbox publishing challenges that async approaches cannot address:
 
-1. **Individual message tracking** - know exactly which messages succeeded/failed
-2. **Non-blocking operations** - high throughput without blocking publisher threads
-3. **Granular error handling** - retry only failed messages
-4. **Precise outbox updates** - mark only confirmed messages as published
+1. **Transaction atomicity** - publishing and database updates happen in same transaction
+2. **No limbo state** - messages are never stuck between published and marked-as-published
+3. **Simple error handling** - either all messages succeed or all retry together
+4. **Guaranteed consistency** - SELECT FOR UPDATE prevents duplicate processing across threads
+5. **Predictable behavior** - no async callbacks or timeout handling complexity
 
 ### Core Implementation
+
+```kotlin
+@Service
+class SyncBatchOutboxPublisher(
+    private val rabbitTemplate: RabbitTemplate,
+    private val outboxRepository: OutboxRepository
+) {
+    @Transactional
+    fun publishOutboxMessages() {
+        // ✅ SELECT FOR UPDATE prevents other threads from selecting same messages
+        val messages = outboxRepository.findUnpublishedAndLock(limit = 1000)
+        
+        if (messages.isEmpty()) return
+        
+        try {
+            // Publish all messages in single channel with batch confirmation
+            rabbitTemplate.invoke { channel ->
+                messages.forEach { outboxMessage ->
+                    channel.convertAndSend(
+                        exchangeName,
+                        routingKey,
+                        outboxMessage.payload
+                    )
+                }
+                
+                // ✅ Wait for ALL confirmations before proceeding
+                // This ensures all messages reached the broker
+                channel.waitForConfirmsOrDie(30_000)
+            }
+            
+            // ✅ ALL messages confirmed - mark in SAME transaction
+            // Either all succeed or transaction rolls back
+            outboxRepository.markAsPublished(messages.map { it.id })
+            
+        } catch (Exception e) {
+            // ❌ Publishing failed - transaction rolls back
+            // Messages remain unpublished and will be retried
+            log.error("Publishing failed for batch of ${messages.size} messages", e)
+            throw e  // Let transaction rollback
+        }
+    }
+}
+```
+
+### Configuration for Sync Batch ACK
+
+```yaml
+spring:
+  rabbitmq:
+    publisher-confirm-type: simple  # Required for confirmations
+    cache:
+      channel:
+        size: 10
+        checkout-timeout: 5000
+```
+
+### Key Characteristics
+
+- **Throughput**: ~1,000-5,000 messages/second (depending on batch size)
+- **Latency**: Moderate (waits for batch confirmations)
+- **Reliability**: Highest (atomic transactions, no lost messages, duplicates possible on re-try)
+- **Memory**: Low (no pending confirmation tracking needed)
+- **Complexity**: Low (simple transaction flow)
+
+### Advantages for Outbox Pattern
+
+**✅ Transaction Safety**
+```kotlin
+@Transactional
+fun publishOutboxMessages() {
+    val messages = findAndLock()     // Same transaction
+    publishAllMessages(messages)     // Same transaction  
+    markAsPublished(messages)        // Same transaction
+    // Either ALL succeed or ALL rollback - no partial state
+}
+```
+
+**✅ Thread Safety** (Note: publish out-of-order possible)
+```kotlin
+// Thread 1: Locks messages 1-1000
+val batch1 = outboxRepository.findUnpublishedAndLock(limit = 1000)
+
+// Thread 2: Gets messages 1001-2000 (different records)
+val batch2 = outboxRepository.findUnpublishedAndLock(limit = 1000)
+
+// No overlap possible due to SELECT FOR UPDATE
+```
+
+**✅ Simple Error Recovery**
+```kotlin
+try {
+    publishAndConfirm(messages)
+    markAsPublished(messages)
+} catch (Exception e) {
+    // Transaction rolls back automatically
+    // Messages remain unpublished for next retry
+    // No complex cleanup needed
+}
+```
+**⚠️ Publish duplicates on NACK**
+```kotlin
+try {
+    publishAndConfirm(messages)
+    markAsPublished(messages)
+} catch (Exception e) {
+    // if publishAndConfirm failed due to received nack - we're
+    // forced to retry the whole batch which creates duplicates
+}
+```
+
+Theoretically, to address duplicate publications on NACK, you can use the callbacks provided by the invoke() method. You can define two callbacks: one for ACK and one for NACK. These callbacks only provide the deliveryTag, but since you're publishing from the same channel, you can try caching a deliveryTag to outboxMessageId mapping in order to individually track and handle NACKed messages and avoid this issue.
+
+## Strategy 3: Async ACK with Correlation (Complex but High Throughput)
+
+While async acknowledgments offer higher throughput, they introduce significant complexity and potential consistency issues for outbox implementations. This approach is not reccomended untill other options are not enough for your use-case.
+
+### Critical Issues with Async ACK for Outbox
+
+Before exploring the async approach, it's important to understand the fundamental challenges it creates:
+
+**⚠️ Transaction Boundary Violation**
+```kotlin
+@Transactional
+fun publishOutboxMessages() {
+    val messages = findUnpublishedAndLock()
+    publishAsync(messages)  // Messages sent to broker
+    // Transaction COMMITS here - but ACKs arrive later!
+}
+
+// Different thread, different transaction
+confirmCallback { correlationData, ack, cause ->
+    if (ack) {
+        // ❌ If this fails, message was published but not marked!
+        markAsPublished(messageId)
+    }
+}
+```
+
+**⚠️ Lost ACK Problem**
+```kotlin
+// What if ACK/NACK never arrives due to:
+// - Network issues
+// - Broker restart  
+// - Connection loss
+// 
+// Message is published but stuck in "pending" state forever
+pendingConfirmations[messageId] = message  // Limbo state
+```
+
+### Why Async ACK is Problematic for Outbox
+
+The async approach conflicts with key outbox pattern guarantees:
+
+1. **Breaks atomicity** - publish and mark-as-published happen in different transactions
+2. **Creates limbo state** - messages can be published but never marked as such
+3. **Timeout complexity** - need cleanup jobs for lost ACKs
+5. **Complex recovery** - sophisticated state machine required
+
+### When Async ACK Makes Sense
+
+Despite the issues, async ACK can work when:
+- **Batch sync ack is not enough**
+- **NACKs happen often, which leads to tons of duplicates with sync ack**
+- **Complex state management acceptable**
+
+### Async Implementation (Use with Caution)
 
 ```kotlin
 @Service
@@ -206,36 +373,39 @@ class AsyncAckOutboxPublisher(
 ) {
     private val pendingConfirmations = ConcurrentHashMap<String, OutboxMessage>()
 
-    fun publishOutboxMessages(messages: List<OutboxMessage>) {
-        val template = createAsyncTemplate()
+    @Transactional
+    fun publishOutboxMessages() {
+        val messages = outboxRepository.findUnpublishedAndLock(limit = 1000)
         
-        measureTime {
-            template.invoke { channel ->
-                messages.forEach { outboxMessage ->
-                    // Track pending confirmation
-                    pendingConfirmations[outboxMessage.id] = outboxMessage
-                    
-                    // Publish with correlation data
-                    channel.convertAndSend(
-                        exchangeName,
-                        routingKey,
-                        outboxMessage.payload,
-                        CorrelationData(outboxMessage.id)
-                    )
-                }
+        // ⚠️ Mark as IN_FLIGHT to prevent re-selection
+        outboxRepository.markAsInFlight(messages.map { it.id })
+        
+        publishAsync(messages)
+        // Transaction commits with messages in IN_FLIGHT state
+    }
+    
+    private fun publishAsync(messages: List<OutboxMessage>) {
+        template.invoke { channel ->
+            messages.forEach { outboxMessage ->
+                // Track pending confirmation
+                pendingConfirmations[outboxMessage.id] = outboxMessage
+                
+                // Publish with correlation data
+                channel.convertAndSend(
+                    exchangeName,
+                    routingKey,
+                    outboxMessage.payload,
+                    CorrelationData(outboxMessage.id)
+                )
             }
-        }.let { duration ->
-            println("Published ${messages.size} messages in $duration")
-            println("Confirmations will arrive asynchronously")
         }
     }
 
     private fun createAsyncTemplate(): RabbitTemplate {
         return RabbitTemplate(connectionFactory).apply {
             messageConverter = Jackson2JsonMessageConverter()
-            setMandatory(true) // Ensure routing validation
+            setMandatory(true)
             
-            // Handle confirmations asynchronously
             setConfirmCallback { correlationData, ack, cause ->
                 val messageId = correlationData?.id
                 val outboxMessage = messageId?.let { 
@@ -243,10 +413,8 @@ class AsyncAckOutboxPublisher(
                 }
                 
                 if (ack && outboxMessage != null) {
-                    // Success: Mark as published in database
                     handleSuccessfulPublish(outboxMessage)
                 } else if (outboxMessage != null) {
-                    // Failure: Handle retry logic
                     handleFailedPublish(outboxMessage, cause ?: "Unknown error")
                 }
             }
@@ -256,46 +424,36 @@ class AsyncAckOutboxPublisher(
     private fun handleSuccessfulPublish(outboxMessage: OutboxMessage) {
         try {
             outboxRepository.markAsPublished(outboxMessage.id)
-            println("✅ Message ${outboxMessage.id} confirmed and marked as published")
         } catch (e: Exception) {
-            println("❌ Failed to mark message ${outboxMessage.id} as published: ${e.message}")
-            // Could implement retry logic for database updates
+            // ❌ Critical: Message was delivered but not marked as published!
+            log.error("Failed to mark message as published: ${outboxMessage.id}", e)
+            // Need sophisticated recovery mechanism here
         }
     }
     
-    private fun handleFailedPublish(outboxMessage: OutboxMessage, cause: String) {
-        println("❌ Message ${outboxMessage.id} NACKed: $cause")
-        
-        when {
-            cause.contains("NO_ROUTE") -> {
-                // Routing failure - likely configuration issue
-                sendToDeadLetterQueue(outboxMessage, "NO_ROUTE: $cause")
-            }
-            cause.contains("RESOURCE_ERROR") -> {
-                // Temporary broker issue - schedule retry
-                scheduleRetry(outboxMessage, Duration.ofMinutes(5))
-            }
-            else -> {
-                // Unknown error - investigate
-                logForInvestigation(outboxMessage, cause)
-                scheduleRetry(outboxMessage, Duration.ofMinutes(1))
+    @Scheduled(fixedDelay = 60000)  // Cleanup job required
+    fun cleanupTimeouts() {
+        val timeoutMessages = outboxRepository.findInFlightOlderThan(Duration.ofMinutes(5))
+        timeoutMessages.forEach { message ->
+            if (pendingConfirmations.containsKey(message.id)) {
+                // Still pending - reset to unpublished for retry
+                outboxRepository.markAsUnpublished(message.id)
+                pendingConfirmations.remove(message.id)
             }
         }
-    }
-    
-    private fun scheduleRetry(outboxMessage: OutboxMessage, delay: Duration) {
-        // Implementation depends on your retry mechanism
-        // Could use database-backed retry queue, scheduler, etc.
-        println("🔄 Scheduling retry for message ${outboxMessage.id} in ${delay.toMinutes()} minutes")
-    }
-    
-    private fun sendToDeadLetterQueue(outboxMessage: OutboxMessage, reason: String) {
-        // Send to DLQ and mark as failed in database
-        println("💀 Sending message ${outboxMessage.id} to dead letter queue: $reason")
-        outboxRepository.markAsFailed(outboxMessage.id, reason)
     }
 }
 ```
+
+### Required Infrastructure for Async ACK
+
+If you choose async ACK despite the complexity, you need:
+
+1. **State machine** with PENDING/IN_FLIGHT/PUBLISHED/FAILED states
+2. **Cleanup jobs**
+3. **Duplicate detection** at consumer level (always should be there IMO)
+4. **Sophisticated monitoring** for limbo states
+5. **Manual intervention procedures** for poison pill messages (needed for sync ack as well)
 
 ### Configuration for Async ACK
 
@@ -309,14 +467,15 @@ spring:
         checkout-timeout: 5000
 ```
 
-### Performance Characteristics
+### Key Characteristics
 
-- **Throughput**: ~60,000 messages/second (with individual tracking)
-- **Latency**: Low (non-blocking confirmations)
-- **Reliability**: High (individual message guarantees)
-- **Memory**: Moderate overhead for tracking pending confirmations
+- **Throughput**: limited only by network and number of workers
+- **Latency**: Low (non-blocking confirmations)  
+- **Reliability**: Moderate (complex error scenarios)
+- **Memory**: High overhead (tracking pending confirmations + cleanup jobs)
+- **Complexity**: High (async flows, state machines, limbo state handling)
 
-## The Channel Churn Pitfall: Critical for Both Strategies
+## Channel Churn Pitfall: Critical for Both Strategies
 
 Channel churn is one of the most dangerous issues in high-throughput RabbitMQ applications. Both publishing strategies must address this properly.
 
@@ -329,7 +488,7 @@ As documented in the [RabbitMQ Java Client Guide](https://www.rabbitmq.com/clien
 3. **Memory usage grows** as channels accumulate
 4. **OutOfMemoryError** occurs when too many channels exist
 
-### The Solution: Always Use invoke()
+### Solution: Publish batch with same channel
 
 ```kotlin
 // ❌ PROBLEMATIC: Each call may checkout new channel
@@ -349,9 +508,8 @@ rabbitTemplate.invoke { channel ->
 
 The `invoke()` method ensures:
 - **Single channel checkout** for the entire operation
-- **Controlled channel lifecycle** - returned to cache when lambda completes
 - **No channel creation overhead** during bulk operations
-- **Predictable memory usage** regardless of message count
+- **Predictable memory usage** regardless of message count with limited number of publisher threads
 
 ### Additional Channel Management
 
@@ -366,101 +524,27 @@ spring:
         checkout-timeout: 5000 # 5 second timeout
 ```
 
-When `checkout-timeout` is set, the channel cache becomes a hard limit. If all channels are busy, threads will wait up to 5 seconds for an available channel, preventing unlimited channel creation.
+When `checkout-timeout` is set, the channel cache becomes a hard limit. If all channels are busy, threads will wait up to 5 seconds for an available channel, preventing unlimited channel creation. In other words, you can avoid OOM by the price of channel checkout timeout exception Rule of thumb here: making sure you're not waisting resources on creating/closing channels while cache size is enough to handle your load so your application is not waiting for channels to be ready. 
 
-## Performance Comparison: Real Benchmarks
+### The Reliability vs Performance Trade-off
 
-Based on testing with 1 million messages:
+**Sync Batch ACK vs Fire-and-Forget**: 
+- Lower throughput but **zero message loss risk**
+- Simple transaction model vs complex async state management
+- Perfect for most business-critical outbox implementations
 
-| Strategy | Throughput | Reliability | Memory Usage | Use Case |
-|----------|------------|-------------|--------------|----------|
-| **Fire & Forget** | 80k msg/s | None | Low | Analytics, logs, non-critical events |
-| **Async ACK** | 60k msg/s | Individual tracking | Moderate | Financial transactions, audit trails |
-| Simple ACK* | 1k msg/s | Blocking | Low | Legacy systems (not recommended) |
+**Sync Batch ACK vs Async ACK**:
+- Much lower throughput but **eliminates transaction boundary issues**
+- Simple error handling vs complex callback management  
+- No limbo states or timeout complexity
+- Poison pill messages require handling in both cases
 
-*Simple ACK performance from [my previous article](https://dev.to/eragoo/from-fire-and-forget-to-reliable-rabbitmq-ack-3nnb) - included for comparison but not recommended for outbox implementations.
+For most production outbox implementations, the reliability and simplicity benefits of Sync Batch ACK outweigh the performance trade-offs because:
 
-### The 25% Performance Trade-off
-
-Async ACK provides individual message tracking with only a 25% performance reduction compared to fire-and-forget (60k vs 80k msg/s). For most production outbox implementations, this trade-off is worthwhile because:
-
-- **Precise database updates** - only mark actually delivered messages as published
-- **Granular error handling** - retry individual failed messages
-- **Better observability** - know exactly what succeeded/failed
-- **Reduced waste** - don't republish already successful messages
-
-## Decision Framework: Choosing Your Strategy
-
-### Choose Fire-and-Forget When:
-- Maximum throughput is critical (80k+ msg/s required)
-- Occasional message loss is acceptable
-- Non-critical business events (user activity, analytics)
-- Very stable network and broker environment
-- Simple implementation is preferred
-
-### Choose Async ACK When:
-- Message delivery guarantees are required
-- Individual error handling is needed
-- Good performance is acceptable (60k+ msg/s)
-- Critical business data (payments, orders, audit trails)
-- Sophisticated retry mechanisms are desired
-
-### Configuration Examples
-
-#### Fire-and-Forget Configuration
-```kotlin
-@Service
-class OutboxPublisher(
-    private val rabbitTemplate: RabbitTemplate,
-    private val outboxRepository: OutboxRepository
-) {
-    @Scheduled(fixedDelay = 1000)
-    fun publishPendingMessages() {
-        val unpublishedMessages = outboxRepository.findUnpublished(limit = 1000)
-        
-        if (unpublishedMessages.isNotEmpty()) {
-            publishFireAndForget(unpublishedMessages)
-        }
-    }
-    
-    private fun publishFireAndForget(messages: List<OutboxMessage>) {
-        rabbitTemplate.invoke { channel ->
-            messages.forEach { message ->
-                channel.convertAndSend(
-                    "outbox.exchange",
-                    message.routingKey,
-                    message.payload
-                )
-            }
-        }
-        
-        // Mark all as published (risk: some might not have reached broker)
-        outboxRepository.markAsPublished(messages.map { it.id })
-    }
-}
-```
-
-#### Async ACK Configuration
-```kotlin
-@Service
-class ReliableOutboxPublisher(
-    private val connectionFactory: ConnectionFactory,
-    private val outboxRepository: OutboxRepository
-) {
-    private val pendingConfirmations = ConcurrentHashMap<String, OutboxMessage>()
-    
-    @Scheduled(fixedDelay = 1000)
-    fun publishPendingMessages() {
-        val unpublishedMessages = outboxRepository.findUnpublished(limit = 1000)
-        
-        if (unpublishedMessages.isNotEmpty()) {
-            publishWithAsyncAck(unpublishedMessages)
-        }
-    }
-    
-    // Implementation as shown above...
-}
-```
+- **Guaranteed consistency** - either all messages publish or none do
+- **Simple debugging** - single transaction flow, no async complexity
+- **No lost messages** - atomic operation prevents limbo states
+- **Lower operational overhead** - no cleanup jobs or state machines needed
 
 ## Monitoring and Observability
 
@@ -472,37 +556,3 @@ For production outbox implementations, implement these monitoring strategies:
 - **Confirmation rate** - ACK/NACK ratio
 - **Pending confirmations** - messages waiting for confirmation
 - **Channel utilization** - active channels vs cache size
-
-### Alerting Thresholds
-```yaml
-# Example monitoring thresholds
-outbox:
-  unpublished_messages:
-    warning: 10000    # Growing backlog
-    critical: 50000   # Publishing can't keep up
-  
-  publishing_rate:
-    warning: < 1000   # Publishing too slow
-    critical: < 100   # Near-zero publishing
-  
-  pending_confirmations:
-    warning: 5000     # Many unconfirmed messages
-    critical: 20000   # Potential memory issues
-```
-
-## Conclusion
-
-The outbox pattern's reliability depends not just on database design but equally on the publishing strategy. Through production experience and testing, I've found that:
-
-1. **Channel management is critical** - always use `rabbitTemplate.invoke()` to prevent memory issues
-2. **Fire-and-forget maximizes speed** but eliminates reliability guarantees
-3. **Async ACK provides the best balance** - 60k msg/s with individual tracking
-4. **Strategy choice depends on requirements** - speed vs reliability trade-offs
-
-For most production systems handling critical business events, **async ACK with correlation** offers the optimal combination of performance, reliability, and operational visibility.
-
-The database optimization techniques are thoroughly covered in [@msdousti's article](https://dev.to/msdousti/postgresql-outbox-pattern-revamped-part-1-3lai), while the foundational RabbitMQ publishing patterns are detailed in my previous articles on [basic ACK strategies](https://dev.to/eragoo/from-fire-and-forget-to-reliable-rabbitmq-ack-3nnb) and [advanced async patterns](https://dev.to/eragoo/from-fire-and-forget-to-reliable-rabbitmq-ack-pt-2-5en6).
-
----
-
-*Have you encountered outbox publishing issues in production? What strategies worked best for your use case? Share your experiences in the comments!* 
